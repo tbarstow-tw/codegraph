@@ -622,6 +622,16 @@ export class CodeGraph {
     return this.db.getBackend();
   }
 
+  /**
+   * The journal mode actually in effect ('wal', 'delete', …). 'wal' means
+   * readers never block on a concurrent writer; anything else means they can,
+   * which is the precondition for the "database is locked" failures in issue
+   * #238. Surfaced via `codegraph status` and the `codegraph_status` MCP tool.
+   */
+  getJournalMode(): string {
+    return this.db.getJournalMode();
+  }
+
   // ===========================================================================
   // Node Operations
   // ===========================================================================

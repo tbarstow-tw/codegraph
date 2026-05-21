@@ -70,7 +70,7 @@ describe('DatabaseConnection — per-instance backend reporting', () => {
     const dbPath = path.join(dir, 'test.db');
     const conn = DatabaseConnection.initialize(dbPath);
     const backend = conn.getBackend();
-    expect(['native', 'wasm']).toContain(backend);
+    expect(['native', 'node-sqlite', 'wasm']).toContain(backend);
     conn.close();
   });
 

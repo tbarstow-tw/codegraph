@@ -542,6 +542,17 @@ export class ToolHandler {
       throw new Error(`CodeGraph not initialized in ${projectPath}. Run 'codegraph init' in that project first.`);
     }
 
+    // If the path resolves to the default project, reuse the already-open
+    // default instance rather than opening a SECOND connection to the same DB.
+    // A duplicate connection serializes reads against the watcher's auto-sync
+    // writes; on the wasm backend (no WAL) that surfaces as intermittent
+    // "database is locked" on concurrent tool calls. See issue #238. Deliberately
+    // not cached under projectPath — the server owns and closes the default
+    // instance, so routing it through projectCache.closeAll() would double-close it.
+    if (this.cg && this.cg.getProjectRoot() === resolvedRoot) {
+      return this.cg;
+    }
+
     // Check if we already have this resolved root cached (different path, same project)
     if (this.projectCache.has(resolvedRoot)) {
       const cg = this.projectCache.get(resolvedRoot)!;
@@ -1327,10 +1338,32 @@ export class ToolHandler {
     const backend = cg.getBackend();
     if (backend === 'native') {
       lines.push(`**Backend:** native (better-sqlite3)`);
+    } else if (backend === 'node-sqlite') {
+      lines.push(
+        `**Backend:** node:sqlite (Node built-in) — full WAL + FTS5. ` +
+        `For maximum speed, restore native: ${WASM_FALLBACK_FIX_RECIPE}`
+      );
     } else {
       lines.push(
         `**Backend:** ⚠ wasm (better-sqlite3 unavailable) — ` +
-        `5-10x slower than native. Fix: ${WASM_FALLBACK_FIX_RECIPE}`
+        `5-10x slower than native, no WAL. Fix: ${WASM_FALLBACK_FIX_RECIPE}`
+      );
+    }
+
+    // Effective journal mode. 'wal' ⇒ concurrent reads never block on a writer;
+    // anything else ⇒ they can ("database is locked"). The wasm backend can't do
+    // WAL, and even native silently falls back to DELETE on filesystems without
+    // shared-memory (network/virtualized mounts, WSL2 /mnt). See issue #238.
+    const journalMode = cg.getJournalMode();
+    if (journalMode === 'wal') {
+      lines.push(`**Journal mode:** wal (concurrent reads safe)`);
+    } else {
+      lines.push(
+        `**Journal mode:** ⚠ ${journalMode || 'unknown'} — WAL not active, so reads ` +
+        `can block on a concurrent write` +
+        // wasm can't do WAL at all; the real-SQLite backends only lack it when the
+        // filesystem doesn't support shared memory (network mounts, WSL2 /mnt).
+        (backend === 'wasm' ? '' : ' (WAL appears unsupported on this filesystem)')
       );
     }
 
