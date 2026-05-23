@@ -181,7 +181,7 @@ Status legend: ✅ done+validated · 🔬 hole identified · ⬜ not started.
 | TypeScript/JS | RxJS / signals | subscribe → operator → observer | S | ⬜ |
 | Python | Django ORM | QuerySet → SQL compiler | R | ✅ |
 | Python | Django / DRF (views) | url → view → model | R + X | ✅ url→view (`path`/`url`/`as_view`) + **DRF `router.register`→ViewSet** (realworld S / wagtail M / saleor L); ORM QuerySet→SQL (prior work). 🔬 signals (`post_save`→receiver), DRF viewset CRUD actions (inherited), saleor GraphQL resolvers |
-| Python | Flask / FastAPI | request → route → dependency | R | 🔬 (routes done) |
+| Python | Flask / FastAPI | request → route → handler → dependency | R + X | ✅ **Flask: handler resolved across intervening decorators (`@login_required`) + stacked `@x.route` lines** (microblog S 6→27, redash L decorator routes 6/6); **FastAPI: empty-path router-root routes `@router.get("")` incl. multi-line** (realworld S 12→20 / Netflix dispatch L **290/290 100%**) + **bare-name builtin guard** — a handler named after a Python builtin method (`index`/`get`/`update`/`count`…) was filtered as a builtin and lost its route→handler edge. 🔬 Flask-RESTful class-based `add_resource(Resource, '/x')` (redash — separate mechanism, not the README decorator/blueprint shape); FastAPI `Depends()` dependency edges (resolver exists, light validation) |
 | Go | Gin / chi / net-http | request → route → handler → service | X | ✅ **routes on ANY group var** (`v1.GET`, `PublicGroup.GET`) not just `r/router` (gin-vue-admin S→M 4→259 / realworld S / gitness L) — was missing all group-routed apps; named handlers resolve precisely. 🔬 inline `func(c){}` handlers (anonymous, body lost), gitness chi custom (26/321) |
 | Rust | Axum / Cargo workspace | request → handler; trait dispatch | R | 🔬 (workspaces done) |
 | Java | Spring | request → @RestController → @Autowired service → repo | R + X | ✅ **bare `@GetMapping`/`@PostMapping` + class `@RequestMapping` prefix join → route→method** (realworld S / mall M / halo L) — was missing all path-less method mappings; DI controller→service resolves (name + dir). 🔬 Spring Data JPA derived queries (`findByEmail`) — metaprogramming frontier |
@@ -324,6 +324,29 @@ Status legend: ✅ done+validated · 🔬 hole identified · ⬜ not started.
   eShopOnWeb 9→33, jellyfin 362→399, all precise (`GET /articles → Get`, class prefix joined), no explosion.
   Agent A/B (eShop catalog listing): codegraph **1–2 reads / 0 grep / 63–75s** vs without **6–7 / 1–6 /
   77–79s**. Residual: EF Core LINQ/DbSet (metaprogramming frontier).
+- **Flask / FastAPI (validated 2026-05-23, fastapi-realworld S / flask-microblog S / Netflix dispatch L /
+  redash L) — decorator-extraction + builtin-name fixes.** Routes were extracted but the request→route→handler
+  flow broke at two regex assumptions and one resolver filter. (1) **Flask required `def` immediately after
+  `@x.route(...)`**, so any intervening decorator (`@login_required`, `@cache.cached`) or **stacked `@x.route`
+  lines** (one view bound to several URLs) dropped the route — microblog extracted **6 of 27** real routes.
+  Switched Flask to FastAPI's `findHandler` scan (match the decorator, then find the next `def`), skipping
+  intervening decorators: **6→27**, all resolved. (2) **FastAPI's path regex `[^'"]+` rejected the empty path**
+  `@router.get("")` (router/prefix-root routes, frequently multi-line) → realworld lost 8 endpoints (list/create
+  article, comments, login/register). `[^'"]+`→`[^'"]*` + empty-path name guard: realworld **12→20**, Netflix
+  dispatch **290/290 (100%)**. (3) **Bare-name builtin guard** (`src/resolution/index.ts`): a handler named
+  after a Python builtin *method* (`index`, `get`, `update`, `count`…) was filtered by `isBuiltInOrExternal`
+  and lost its route→handler edge — microblog's `index` view (its `/` + `/index` stacked routes) resolved to
+  nothing. The dotted-method branch already had a `knownNames` guard; mirrored it onto the bare branch (a name
+  a declared symbol owns is not a builtin call). +2 legit edges on realworld, **0 change on the django control**
+  (302/373 identical — precision held). Flows trace end-to-end (`login → get_user_by_email` 2 hops;
+  `create_user → from_dict`). Agent A/B (realworld login-auth flow, n=2/arm): codegraph **0–1 read / 0 grep /
+  3–4 codegraph / 30–39s** (context→[search]→trace→node) vs without **3 read / 2 grep / 33–36s** — eliminates
+  grep, cuts reads to 0–1 (small repo, so wall-clock ties; the tool-count drop is the win). Residuals: **Flask-RESTful** class-based
+  `api.add_resource(Resource,'/x')` (redash's actual API shape — a separate class-method-as-verb mechanism, NOT
+  the README's documented decorator/blueprint Flask) and a pre-existing **JS file-route false-positive** in
+  redash's React frontend (32 bogus `.js` "routes" from a JS resolver — unrelated to Python). **Lesson: the
+  builtin-name filter is a silent precision tax across Python** — any view/function named `get`/`index`/`update`
+  loses edges; the fix is general (helps Django/DRF handlers too), not Flask-specific.
 - **Difficulty gradient is real:** named-ref dispatch (resolver) is cheap; anonymous
   callback dispatch (synthesizer) is medium; **anonymous-arrow handlers are the hard
   remaining gap** (no identity → need synthesizer link-through-body, not yet built).
