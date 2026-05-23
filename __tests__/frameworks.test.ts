@@ -123,6 +123,31 @@ def create_user(id):
     expect(nodes[0].name).toBe('POST /<id>');
     expect(references[0].referenceName).toBe('create_user');
   });
+
+  it('resolves the handler across an intervening decorator (@login_required)', () => {
+    const src = `
+@bp.route('/profile')
+@login_required
+def profile():
+    return render_template('profile.html')
+`;
+    const { nodes, references } = flaskResolver.extract!('routes.py', src);
+    expect(nodes[0].name).toBe('GET /profile');
+    expect(references[0].referenceName).toBe('profile');
+  });
+
+  it('extracts stacked @x.route decorators bound to one view', () => {
+    const src = `
+@bp.route('/', methods=['GET', 'POST'])
+@bp.route('/index', methods=['GET', 'POST'])
+@login_required
+def index():
+    return render_template('index.html')
+`;
+    const { nodes, references } = flaskResolver.extract!('routes.py', src);
+    expect(nodes.map((n) => n.name)).toEqual(['GET /', 'GET /index']);
+    expect(references.map((r) => r.referenceName)).toEqual(['index', 'index']);
+  });
 });
 
 describe('fastapiResolver.extract', () => {
@@ -146,6 +171,32 @@ def create_item(item: Item):
     const { nodes, references } = fastapiResolver.extract!('items.py', src);
     expect(nodes[0].name).toBe('POST /items');
     expect(references[0].referenceName).toBe('create_item');
+  });
+
+  it('extracts a route mounted at the router/prefix root (empty path)', () => {
+    const src = `
+@router.get("", response_model=ListOfArticles, name="articles:list")
+async def list_articles():
+    return []
+`;
+    const { nodes, references } = fastapiResolver.extract!('articles.py', src);
+    expect(nodes[0].name).toBe('GET /');
+    expect(references[0].referenceName).toBe('list_articles');
+  });
+
+  it('extracts a multi-line decorator with an empty path', () => {
+    const src = `
+@router.post(
+    "",
+    status_code=201,
+    response_model=ArticleInResponse,
+)
+async def create_article():
+    pass
+`;
+    const { nodes, references } = fastapiResolver.extract!('articles.py', src);
+    expect(nodes[0].name).toBe('POST /');
+    expect(references[0].referenceName).toBe('create_article');
   });
 });
 
@@ -463,13 +514,13 @@ describe('laravelResolver.extract', () => {
     const src = `Route::get('/users', [UserController::class, 'index']);\n`;
     const { nodes, references } = laravelResolver.extract!('routes/web.php', src);
     expect(nodes[0].name).toBe('GET /users');
-    expect(references[0].referenceName).toBe('index');
+    expect(references[0].referenceName).toBe('UserController@index');
   });
 
   it('extracts route with Controller@action syntax', () => {
     const src = `Route::post('/users', 'UserController@store');\n`;
     const { nodes, references } = laravelResolver.extract!('routes/web.php', src);
-    expect(references[0].referenceName).toBe('store');
+    expect(references[0].referenceName).toBe('UserController@store');
   });
 
   it('extracts resource route', () => {
@@ -487,13 +538,13 @@ describe('railsResolver.extract', () => {
     const src = `get '/users', to: 'users#index'\n`;
     const { nodes, references } = railsResolver.extract!('config/routes.rb', src);
     expect(nodes[0].name).toBe('GET /users');
-    expect(references[0].referenceName).toBe('index');
+    expect(references[0].referenceName).toBe('users#index');
   });
 
   it('extracts route without to: keyword', () => {
     const src = `post '/items' => 'items#create'\n`;
     const { nodes, references } = railsResolver.extract!('config/routes.rb', src);
-    expect(references[0].referenceName).toBe('create');
+    expect(references[0].referenceName).toBe('items#create');
   });
 });
 
@@ -969,7 +1020,7 @@ Route::get('/real', [RealController::class, 'index']);
 `;
     const { nodes, references } = laravelResolver.extract!('routes/web.php', src);
     expect(nodes.map((n) => n.name)).toEqual(['GET /real']);
-    expect(references.map((r) => r.referenceName)).toEqual(['index']);
+    expect(references.map((r) => r.referenceName)).toEqual(['RealController@index']);
   });
 
   it('rails: skips =begin/=end and # commented routes', () => {
@@ -982,7 +1033,7 @@ get '/real', to: 'real#index'
 `;
     const { nodes, references } = railsResolver.extract!('config/routes.rb', src);
     expect(nodes.map((n) => n.name)).toEqual(['GET /real']);
-    expect(references.map((r) => r.referenceName)).toEqual(['index']);
+    expect(references.map((r) => r.referenceName)).toEqual(['real#index']);
   });
 
   it('spring: skips // and /* */ commented @GetMapping', () => {

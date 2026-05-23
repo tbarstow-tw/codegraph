@@ -199,12 +199,14 @@ export const flaskResolver: FrameworkResolver = {
   extract(filePath, content) {
     if (!filePath.endsWith('.py')) return { nodes: [], references: [] };
     return extractDecoratorRoutes(filePath, stripCommentsForRegex(content, 'python'), {
-      // Flask: @x.route('/path', methods=[...])
-      decoratorRegex: /@(\w+)\.route\s*\(\s*['"]([^'"]+)['"](?:\s*,\s*methods\s*=\s*\[([^\]]+)\])?\s*\)\s*\n\s*(?:async\s+)?def\s+(\w+)/g,
+      // Flask: @x.route('/path', methods=[...]) — the handler is the next `def`,
+      // allowing intervening decorators (@login_required, @cache.cached) and
+      // stacked @x.route() lines (one view bound to several URLs).
+      decoratorRegex: /@(\w+)\.route\s*\(\s*['"]([^'"]*)['"](?:\s*,\s*methods\s*=\s*\[([^\]]+)\])?\s*\)/g,
       defaultMethod: 'GET',
       methodFromGroup: 3,
       pathGroup: 2,
-      handlerGroup: 4,
+      findHandler: true,
       language: 'python',
     });
   },
@@ -241,8 +243,9 @@ export const fastapiResolver: FrameworkResolver = {
   extract(filePath, content) {
     if (!filePath.endsWith('.py')) return { nodes: [], references: [] };
     return extractDecoratorRoutes(filePath, stripCommentsForRegex(content, 'python'), {
-      // FastAPI: @x.METHOD('/path') -> handler on the next def line
-      decoratorRegex: /@(\w+)\.(get|post|put|patch|delete|options|head)\s*\(\s*['"]([^'"]+)['"]/g,
+      // FastAPI: @x.METHOD('/path') -> handler on the next def line. Path may be
+      // empty ("") for routes mounted at the router/prefix root.
+      decoratorRegex: /@(\w+)\.(get|post|put|patch|delete|options|head)\s*\(\s*['"]([^'"]*)['"]/g,
       defaultMethod: '',
       methodGroup: 2,
       pathGroup: 3,
@@ -278,7 +281,7 @@ function extractDecoratorRoutes(filePath: string, content: string, opts: Decorat
       if (m) method = m[1]!.toUpperCase();
     }
     const line = content.slice(0, match.index).split('\n').length;
-    const name = method ? `${method} ${routePath}` : routePath!;
+    const name = method ? `${method} ${routePath || '/'}` : (routePath || '/');
     const routeNode: Node = {
       id: `route:${filePath}:${line}:${method}:${routePath}`,
       kind: 'route',

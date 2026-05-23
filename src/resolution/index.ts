@@ -758,7 +758,13 @@ export class ReferenceResolver {
           }
         }
       }
-      if (PYTHON_BUILT_IN_METHODS.has(name)) {
+      // A bare name colliding with a builtin method (index, get, update, count…)
+      // is only a builtin when NOTHING in the codebase declares it. A declared
+      // symbol with that exact name — e.g. a Flask/FastAPI view `def index()` or
+      // `def get()` — is a real reference target. Mirrors the knownNames guard on
+      // the dotted branch above; without it, every handler named after a builtin
+      // method silently loses its route→handler edge.
+      if (PYTHON_BUILT_IN_METHODS.has(name) && !this.knownNames?.has(name)) {
         return true;
       }
     }
