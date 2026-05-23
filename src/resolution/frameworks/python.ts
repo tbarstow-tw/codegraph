@@ -35,7 +35,23 @@ export const djangoResolver: FrameworkResolver = {
       const result = resolveByNameAndKind(ref.referenceName, CLASS_KINDS, FORM_DIRS, context);
       if (result) return { original: ref, targetNodeId: result, confidence: 0.8, resolvedBy: 'framework' };
     }
+    // ORM dynamic dispatch: QuerySet._fetch_all (and siblings) call
+    // `self._iterable_class(self)` — a runtime dispatch to the iterable class
+    // (default ModelIterable) whose __iter__ runs the SQL compiler. Static
+    // parsing can't resolve an attribute-as-callable, so it leaves an unresolved
+    // `_iterable_class` ref and a hole in the QuerySet→compiler chain. Bridge it
+    // to ModelIterable.__iter__ so the flow actually exists in the graph.
+    if (ref.referenceName === '_iterable_class') {
+      const target = resolveModelIterableIter(context);
+      if (target) return { original: ref, targetNodeId: target, confidence: 0.7, resolvedBy: 'framework' };
+    }
     return null;
+  },
+
+  // Let the ORM dynamic-dispatch ref reach resolve() despite no symbol being
+  // named `_iterable_class` (it's a QuerySet attribute, not a declared method).
+  claimsReference(name) {
+    return name === '_iterable_class';
   },
 
   extract(filePath, content) {
@@ -89,6 +105,22 @@ export const djangoResolver: FrameworkResolver = {
     return { nodes, references };
   },
 };
+
+/**
+ * Find ModelIterable.__iter__ — the default iterable QuerySet invokes via
+ * `self._iterable_class(self)`. Its __iter__ statically calls the SQL compiler,
+ * so linking the dynamic dispatch here closes the QuerySet→SQL call chain.
+ * (Over-approximates to the default iterable; .values()/.values_list() swap in
+ * other BaseIterable subclasses, but ModelIterable is the canonical path.)
+ */
+function resolveModelIterableIter(context: ResolutionContext): string | null {
+  const cls = context.getNodesByName('ModelIterable').find((n) => n.kind === 'class');
+  if (!cls) return null;
+  const iter = context.getNodesByName('__iter__').find(
+    (n) => n.filePath === cls.filePath && n.startLine >= cls.startLine && n.startLine <= cls.endLine
+  );
+  return iter ? iter.id : null;
+}
 
 /**
  * Parse a Django URL handler expression and return the symbol/module to link.

@@ -1678,6 +1678,21 @@ export class TreeSitterExtractor {
         }
       }
 
+      // Nested NAMED functions inside a body — function declarations and named
+      // function expressions like `.on('mount', function onmount(){})` — become
+      // their own nodes so the graph can link to them (callback handlers, local
+      // helpers). Anonymous arrows/expressions fall through to the default
+      // recursion below, keeping their inner calls attributed to the enclosing
+      // function: this bounds the new nodes to NAMED functions only (no explosion,
+      // no lost edges). extractFunction walks the nested body itself, so we return.
+      if (this.extractor!.functionTypes.includes(nodeType)) {
+        const nestedName = extractName(node, this.source, this.extractor!);
+        if (nestedName && nestedName !== '<anonymous>') {
+          this.extractFunction(node);
+          return;
+        }
+      }
+
       // Extract structural nodes found inside function bodies.
       // Each extract method visits its own children, so we return after extracting.
       if (this.extractor!.classTypes.includes(nodeType)) {

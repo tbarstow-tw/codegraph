@@ -19,6 +19,7 @@ import {
 import { matchReference } from './name-matcher';
 import { resolveViaImport, extractImportMappings, extractReExports } from './import-resolver';
 import { detectFrameworks } from './frameworks';
+import { synthesizeCallbackEdges } from './callback-synthesizer';
 import { loadProjectAliases, type AliasMap } from './path-aliases';
 import { logDebug } from '../errors';
 import type { ReExport } from './types';
@@ -493,7 +494,11 @@ export class ReferenceResolver {
     // from './barrel'` where the barrel has `export { signIn as login }
     // from './auth'`) intentionally call a name that has no
     // declaration anywhere — only the renamed upstream symbol does.
-    if (!this.hasAnyPossibleMatch(ref.referenceName) && !this.matchesAnyImport(ref)) {
+    if (
+      !this.hasAnyPossibleMatch(ref.referenceName) &&
+      !this.matchesAnyImport(ref) &&
+      !this.frameworks.some((f) => f.claimsReference?.(ref.referenceName))
+    ) {
       return null;
     }
 
@@ -679,6 +684,16 @@ export class ReferenceResolver {
       if (result.resolved.length === 0 && result.unresolved.length === batch.length) {
         break;
       }
+    }
+
+    // Dynamic-edge synthesis: now that all base `calls` edges are persisted,
+    // synthesize observer/callback dispatch edges (dispatcher → registered
+    // callbacks) that static parsing leaves out. Best-effort — never fail the
+    // index on it. See docs/design/callback-edge-synthesis.md.
+    try {
+      aggregateStats.byMethod['callback-synthesis'] = synthesizeCallbackEdges(this.queries, this.context);
+    } catch {
+      // synthesis is additive and optional; ignore failures
     }
 
     return {
