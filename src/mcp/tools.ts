@@ -1274,25 +1274,33 @@ export class ToolHandler {
   private buildFlowFromNamedSymbols(cg: CodeGraph, query: string): string {
     try {
       const CALLABLE = new Set(['method', 'function', 'component', 'constructor']);
+      // Strip only a REAL file extension (Create.cs → Create); KEEP qualified
+      // names (Class.method / Class::method) — the agent's most precise input,
+      // resolved exactly by findAllSymbols. (The old strip mangled Class.method
+      // into Class, throwing the method away.)
+      const FILE_EXT = /\.(?:java|kt|kts|ts|tsx|js|jsx|mjs|cjs|cs|py|go|rb|php|swift|rs|cpp|cc|cxx|c|h|hpp|scala|lua|dart|vue|svelte)$/i;
       const tokens = [...new Set(
-        query.split(/[\s,]+/)
-          .map((t) => t.replace(/\.[A-Za-z0-9]+$/, '').trim()) // strip file ext: Create.cs → Create
-          .filter((t) => /^[A-Za-z_$][\w$]{2,}$/.test(t))
+        query.split(/[\s,()[\]]+/)
+          .map((t) => t.replace(FILE_EXT, '').trim())
+          .filter((t) => t.length >= 3 && /^[A-Za-z_$][\w$]*(?:(?:::|\.)[\w$]+)*$/.test(t))
       )].slice(0, 16);
       if (tokens.length < 2) return '';
-      const lower = tokens.map((t) => t.toLowerCase());
+      // Pool of name SEGMENTS (Class + method from every token) used to
+      // disambiguate an ambiguous SIMPLE name: keep a candidate only if its
+      // CONTAINER class is itself named in the query.
+      const segPool = new Set<string>();
+      for (const t of tokens) for (const s of t.toLowerCase().split(/::|\./)) if (s) segPool.add(s);
       const named = new Map<string, Node>();
       for (const t of tokens) {
         const cands = this.findAllSymbols(cg, t).nodes.filter((n) => CALLABLE.has(n.kind));
-        // Disambiguate by co-naming: for an ambiguous name keep only candidates
-        // qualified by another named token; a specific name (<=3 hits) keeps all.
+        // A qualified or otherwise-specific name (<=3 hits) keeps all; an
+        // ambiguous simple name keeps only candidates whose container is named.
         const pick = cands.length <= 3
           ? cands
           : cands.filter((n) => {
-              // Match qualifiedName SEGMENTS (Class::method), not substrings —
-              // "list" is a substring of "getList" but not a segment of it.
               const segs = (n.qualifiedName || '').toLowerCase().split(/::|\./).filter(Boolean);
-              return lower.some((o) => o !== t.toLowerCase() && segs.includes(o));
+              const container = segs.length >= 2 ? segs[segs.length - 2] : '';
+              return !!container && segPool.has(container);
             });
         for (const n of pick.slice(0, 6)) named.set(n.id, n);
         if (named.size > 40) break;
