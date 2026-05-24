@@ -7,23 +7,36 @@ a [GitHub Release](https://github.com/colbymchenry/codegraph/releases) tagged
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.4] - 2026-05-24
 
 ### Added
+- **Framework-aware route resolution — `request → route → handler → service`
+  flows now resolve end-to-end across the supported stacks.** Added or fixed
+  routing for Express (inline arrow handlers → services), Rails, Spring (Java +
+  Kotlin; bare and class-prefixed mappings), Django/DRF (`router.register` →
+  ViewSet), Laravel (`Controller@method`), Flask/FastAPI (decorator stacks,
+  empty-path routers, Flask-RESTful `add_resource`), Gin/chi (group-var routing),
+  ASP.NET (feature-folder + bare attribute routes), Drupal, Rust (Axum chained
+  methods, actix builder API), Vapor (Swift grouped routes), Play (`conf/routes`),
+  Vue/Nuxt SFC templates, Svelte/SvelteKit, and React Router (`<Route>` JSX +
+  object data-router).
+- **Dynamic-dispatch flow synthesis — `codegraph_trace`, `codegraph_callees`, and
+  `codegraph_explore` now follow flows that have no static call edge.** Bridged
+  channels: callback/observer registration, EventEmitter (`on`/`emit`), React
+  re-render (`setState` → `render`) and JSX children, Flutter `setState` → `build`,
+  C++ virtual overrides, and Java/Kotlin interface → implementation dispatch
+  (e.g. Spring `@Autowired svc.list()` → the impl). Each synthesized hop is
+  labeled inline in `trace` with where it was wired up.
 - **`CODEGRAPH_MCP_TOOLS` — trim the exposed MCP tool surface.** Set it to a
   comma-separated list of tool names (e.g. `trace,search,node,context`) to expose
   only those codegraph tools over MCP; unset exposes all of them. Names match on
   the short form, so `trace` and `codegraph_trace` are equivalent. Lets you
   constrain an agent to a minimal surface (or A/B-test tool selection) without
   editing the client's MCP config. Inert by default.
-- **Java/Kotlin interface & abstract dispatch is now traceable.** A call through
-  an injected interface (Spring `@Autowired FooService svc; svc.list()`) or an
-  abstract base previously dead-ended at the interface method — there's no static
-  edge to the implementation — so request→service→impl flows broke at the DI
-  boundary. CodeGraph now synthesizes interface/base-method → implementing-override
-  edges, so `codegraph_trace` and `codegraph_callees` follow the flow into the
-  implementation (e.g. controller → service interface → service impl). JVM-gated,
-  capped per class, overload-aware.
+- **Release archives now ship with a `SHA256SUMS` file**, and the npm launcher
+  verifies the bundle it downloads against it — a mismatch aborts before anything
+  runs. Releases published before this change have no checksum file, so the
+  verification is skipped (not failed) when none is available.
 
 ### Changed
 - **`codegraph_trace` now returns a self-contained flow dossier.** Each hop on
@@ -47,9 +60,13 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Scoped to the named symbols (no wrong-feature wandering) and bridge-capped (no
   god-function fan-out); absent when the query is fuzzy or has no connected chain.
 
-## [0.9.4] - 2026-05-22
-
 ### Fixed
+- **Static-extraction & resolution correctness fixes** underpinning the framework
+  work above: C++ inheritance (`base_class_clause` was unhandled, so C++ `extends`
+  edges were missing), Dart method body ranges (methods were extracted
+  signature-only), a Python builtin-name handler guard (handlers named
+  `index`/`get`/`update` were silently dropped), and an explore output-budget
+  regression that under-returned source on god-file repos.
 - **Orphaned `codegraph serve --mcp` processes after a parent SIGKILL.** When
   the MCP host (Claude Code, opencode, …) was force-killed — OOM killer, a
   `kill -9`, a container teardown — the child kept running indefinitely on
@@ -61,13 +78,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `5000`, `0` disables). Resolves
   [#277](https://github.com/colbymchenry/codegraph/issues/277).
 
-### Added
-- **Release archives now ship with a `SHA256SUMS` file**, and the npm launcher
-  verifies the bundle it downloads against it — a mismatch aborts before
-  anything runs. Releases published before this change have no checksum file, so
-  the verification is skipped (not failed) when none is available.
-
-### Fixed
 - **`codegraph: no prebuilt bundle for <platform>` after installing through a
   registry mirror.** Installing `@colbymchenry/codegraph` from a registry that
   hadn't mirrored the matching per-platform package — most often the
