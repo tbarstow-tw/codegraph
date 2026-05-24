@@ -1258,6 +1258,92 @@ export class ToolHandler {
   }
 
   /**
+   * Flow-from-named-symbols: an agent's codegraph_explore query is a bag of
+   * symbol names that usually spans the flow it's investigating (e.g.
+   * "PmsProductController getList PmsProductService list PmsProductServiceImpl").
+   * Surface the longest call chain AMONG those named symbols — scoped to what the
+   * agent explicitly named, so (unlike a fuzzy relevance set) there's no
+   * wrong-feature wandering. Rides synthesized edges, so controller→service-
+   * interface→impl shows up. Returns '' if no chain of >=3 nodes exists.
+   *
+   * Ambiguous tokens (Java `list` → dozens of nodes) are disambiguated by
+   * CO-NAMING: the agent names the class too, so we keep only `list` candidates
+   * whose qualifiedName contains another named token (`PmsProductServiceImpl::list`),
+   * dropping unrelated `OmsOrderService::list`.
+   */
+  private buildFlowFromNamedSymbols(cg: CodeGraph, query: string): string {
+    try {
+      const CALLABLE = new Set(['method', 'function', 'component', 'constructor']);
+      const tokens = [...new Set(
+        query.split(/[\s,]+/)
+          .map((t) => t.replace(/\.[A-Za-z0-9]+$/, '').trim()) // strip file ext: Create.cs → Create
+          .filter((t) => /^[A-Za-z_$][\w$]{2,}$/.test(t))
+      )].slice(0, 16);
+      if (tokens.length < 2) return '';
+      const lower = tokens.map((t) => t.toLowerCase());
+      const named = new Map<string, Node>();
+      for (const t of tokens) {
+        const cands = this.findAllSymbols(cg, t).nodes.filter((n) => CALLABLE.has(n.kind));
+        // Disambiguate by co-naming: for an ambiguous name keep only candidates
+        // qualified by another named token; a specific name (<=3 hits) keeps all.
+        const pick = cands.length <= 3
+          ? cands
+          : cands.filter((n) => {
+              // Match qualifiedName SEGMENTS (Class::method), not substrings —
+              // "list" is a substring of "getList" but not a segment of it.
+              const segs = (n.qualifiedName || '').toLowerCase().split(/::|\./).filter(Boolean);
+              return lower.some((o) => o !== t.toLowerCase() && segs.includes(o));
+            });
+        for (const n of pick.slice(0, 6)) named.set(n.id, n);
+        if (named.size > 40) break;
+      }
+      if (named.size < 2) return '';
+      const MAX_HOPS = 7;
+      let best: Array<{ node: Node; edge: Edge | null }> | null = null;
+      // BFS the full call graph (incl. synth edges) from each named seed, but
+      // only ACCEPT a sink that is also named — both ends anchored to symbols the
+      // agent named, so the chain stays on-topic while bridging intermediates
+      // (e.g. the exact interface overload) that the token resolution missed.
+      for (const seed of [...named.values()].slice(0, 8)) {
+        const parent = new Map<string, { prev: string | null; edge: Edge | null; node: Node }>();
+        parent.set(seed.id, { prev: null, edge: null, node: seed });
+        const q: Array<{ id: string; depth: number; streak: number }> = [{ id: seed.id, depth: 0, streak: 0 }];
+        let deep: string | null = null, deepDepth = 0;
+        const MAX_BRIDGE = 1; // ≤1 consecutive UNNAMED hop: bridge one missing intermediate, never wander a god-function's fan-out
+        for (let h = 0; h < q.length && parent.size < 1500; h++) {
+          const { id, depth, streak } = q[h]!;
+          if (id !== seed.id && named.has(id) && depth > deepDepth) { deep = id; deepDepth = depth; }
+          if (depth >= MAX_HOPS - 1) continue;
+          for (const c of cg.getCallees(id)) {
+            if (c.edge.kind !== 'calls' || parent.has(c.node.id)) continue;
+            const newStreak = named.has(c.node.id) ? 0 : streak + 1;
+            if (newStreak > MAX_BRIDGE) continue;
+            parent.set(c.node.id, { prev: id, edge: c.edge, node: c.node });
+            q.push({ id: c.node.id, depth: depth + 1, streak: newStreak });
+          }
+        }
+        if (!deep) continue;
+        const chain: Array<{ node: Node; edge: Edge | null }> = [];
+        let cur: string | null = deep;
+        while (cur) { const p = parent.get(cur); if (!p) break; chain.push({ node: p.node, edge: p.edge }); cur = p.prev; }
+        chain.reverse();
+        if (!best || chain.length > best.length) best = chain;
+      }
+      if (!best || best.length < 3) return '';
+      const out = ['## Flow (call path among the symbols you queried)', ''];
+      for (let i = 0; i < best.length; i++) {
+        const step = best[i]!;
+        if (step.edge) { const sy = this.synthEdgeNote(step.edge); out.push(`   ↓ ${sy ? sy.compact : step.edge.kind}`); }
+        out.push(`${i + 1}. ${step.node.name} (${step.node.filePath}:${step.node.startLine})`);
+      }
+      out.push('', '> Full source for these symbols is below; codegraph_trace(from,to) for the exact path between two endpoints.', '');
+      return out.join('\n');
+    } catch {
+      return '';
+    }
+  }
+
+  /**
    * Handle codegraph_explore — deep exploration in a single call
    *
    * Strategy: find relevant symbols via graph traversal, group by file,
@@ -1765,7 +1851,7 @@ export class ToolHandler {
     // maxOutputChars (observed 30k against a 28k tier cap). A fat explore
     // payload persists in the agent's context and is re-read as cache-input
     // on every subsequent turn, so the overrun is paid many times over.
-    const output = lines.join('\n');
+    const output = this.buildFlowFromNamedSymbols(cg, query) + lines.join('\n');
     if (output.length > budget.maxOutputChars) {
       const cut = output.slice(0, budget.maxOutputChars);
       const lastNewline = cut.lastIndexOf('\n');

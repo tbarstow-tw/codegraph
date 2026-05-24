@@ -36,6 +36,16 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`codegraph_node` and `codegraph_trace` now emit line-numbered source**
   (`cat -n` style, matching `codegraph_explore` and Read), so an agent can cite
   or edit exact lines without re-reading the file just to recover line numbers.
+- **`codegraph_explore` now leads with the execution flow** when its query names
+  the symbols of a flow. Agents call `explore` far more than `trace`, passing a
+  bag of symbol names that usually spans the flow they're investigating
+  (`PmsProductController getList PmsProductService list PmsProductServiceImpl`);
+  `explore` now finds the call path *among those named symbols* — riding
+  synthesized dynamic-dispatch edges (callback / React re-render / JSX child /
+  interface→impl) — and shows it first. So a flow question answered through
+  `explore` gets the trace-quality path without the agent having to switch tools.
+  Scoped to the named symbols (no wrong-feature wandering) and bridge-capped (no
+  god-function fan-out); absent when the query is fuzzy or has no connected chain.
 
 ## [0.9.4] - 2026-05-22
 
