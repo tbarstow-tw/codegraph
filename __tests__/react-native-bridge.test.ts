@@ -264,4 +264,31 @@ describe('React Native bridge resolver', () => {
       reactNativeBridgeResolver.resolve(ref('compute', 'objc', 'OtherMod.m'), ctx)
     ).toBeNull();
   });
+
+  describe('RCTEventEmitter built-ins blocklist', () => {
+    it('skips addListener / remove (every emitter exposes these — bridging them creates noise)', () => {
+      // A repo with RCTEventEmitter subclass: defines `addListener:` and
+      // `remove:` because that's what `[RCTEventEmitter addListener:]`
+      // requires. JS callers of `.addListener(...)` should NOT resolve
+      // here — they're hitting the JS-side `NativeEventEmitter`
+      // abstraction, not the native emitter directly.
+      const native1 = method('addListener:', 'objc', 'EventEmitter.m');
+      const native2 = method('remove:', 'objc', 'EventEmitter.m');
+      const ctx = makeContext([native1, native2], {
+        'package.json': '{"dependencies":{"react-native":"^0.73"}}',
+        'EventEmitter.m':
+          '@implementation EventEmitter\n' +
+          'RCT_EXPORT_MODULE()\n' +
+          'RCT_EXPORT_METHOD(addListener:(NSString *)eventName) {}\n' +
+          'RCT_EXPORT_METHOD(remove:(double)id) {}\n' +
+          '@end',
+      });
+      expect(
+        reactNativeBridgeResolver.resolve(ref('addListener', 'javascript', 'App.js'), ctx)
+      ).toBeNull();
+      expect(
+        reactNativeBridgeResolver.resolve(ref('remove', 'typescript', 'App.ts'), ctx)
+      ).toBeNull();
+    });
+  });
 });

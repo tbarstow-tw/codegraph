@@ -237,6 +237,23 @@ function parseTurboModuleSpec(
 
 // ─── Map building ───────────────────────────────────────────────────────────
 
+/**
+ * RCTEventEmitter built-ins that every emitter subclass inherits. JS code
+ * doesn't directly call these — they're internal plumbing for the
+ * `NativeEventEmitter` abstraction. If we leave them in the bridge map,
+ * every JS `addListener` / `remove` call (Firestore subscribers, RxJS
+ * pipelines, plain Array.remove, etc.) gets mis-bridged to whichever
+ * emitter happens to define them. Skip during map building.
+ */
+const RN_EMITTER_BUILTINS = new Set([
+  'addListener',
+  'removeListeners',
+  'remove',
+  'invalidate',
+  'startObserving',
+  'stopObserving',
+]);
+
 function buildRNMaps(context: ResolutionContext): { byJsName: Map<string, NativeMethod[]> } {
   const cached = nativeMethodMaps.get(context);
   if (cached) return cached;
@@ -270,6 +287,7 @@ function buildRNMaps(context: ResolutionContext): { byJsName: Map<string, Native
       const className = findObjcClassName(source);
       const exports = parseObjcRNExports(source, className);
       for (const exp of exports) {
+        if (RN_EMITTER_BUILTINS.has(exp.jsName)) continue;
         // Resolve to the native node by selector first-keyword. Multiple
         // ObjC methods may share a first keyword across modules; filter by
         // file path to attribute the export to this module's
@@ -290,6 +308,7 @@ function buildRNMaps(context: ResolutionContext): { byJsName: Map<string, Native
       if (!source) continue;
       const exports = parseJvmRNExports(source);
       for (const exp of exports) {
+        if (RN_EMITTER_BUILTINS.has(exp.jsName)) continue;
         const candidates = jvmMethodsByName.get(exp.jsName) ?? [];
         const node = candidates.find((c) => c.filePath === file) ?? candidates[0];
         if (!node) continue;
@@ -311,6 +330,7 @@ function buildRNMaps(context: ResolutionContext): { byJsName: Map<string, Native
       // path (Codegen wires it via name convention), so we match across
       // all native methods of the right name.
       for (const methodName of spec.methods) {
+        if (RN_EMITTER_BUILTINS.has(methodName)) continue;
         // ObjC first-keyword match, then JVM bare-name match. Don't
         // require module-name match for ObjC because the native side may
         // have stripped a prefix.
