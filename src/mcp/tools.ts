@@ -127,6 +127,26 @@ export interface ExploreOutputBudget {
 }
 
 export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
+  if (fileCount < 150) {
+    return {
+      // Very-tiny tier paired with the tool gating in ToolHandler.getTools
+      // (<150 files exposes only 5 core tools). Together: ~50% prompt
+      // overhead reduction + tighter explore output. Per-file kept at
+      // 3800 (the next tier's value) to satisfy the monotonic invariant.
+      // Relationships kept ON — cheap structural signal that survives
+      // even after the budget cut.
+      maxOutputChars: 13000,
+      defaultMaxFiles: 4,
+      maxCharsPerFile: 3800,
+      gapThreshold: 7,
+      maxSymbolsInFileHeader: 5,
+      maxEdgesPerRelationshipKind: 4,
+      includeRelationships: true,
+      includeAdditionalFiles: false,
+      includeCompletenessSignal: false,
+      includeBudgetNote: false,
+    };
+  }
   if (fileCount < 500) {
     return {
       maxOutputChars: 18000,
