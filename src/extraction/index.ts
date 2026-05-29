@@ -149,6 +149,12 @@ const DEFAULT_IGNORE_DIRS: ReadonlySet<string> = new Set([
   '__history', '__recovery',
   // Generic cache
   '.cache',
+  // AI agent / assistant tooling — prompts, skills, hooks, and bundled helper
+  // scripts (e.g. .claude/skills/**/*.py) are project *configuration*, not the
+  // codebase under audit. Indexing them injects phantom symbols and call edges
+  // (a helper's `json.dumps(...)` becomes a `json` call node) that pollute the
+  // graph. Excluded uniformly like other dot-dirs; opt back in via `!.claude/`.
+  '.claude', '.cursor', '.windsurf', '.aider',
 ]);
 
 /** Gitignore-style patterns for the `ignore` matcher: the dirs above plus a few globs. */
