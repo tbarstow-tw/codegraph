@@ -352,6 +352,64 @@ export const fetchData = async () => {
   });
 });
 
+describe('CommonJS Factory-Arrow Class Extraction', () => {
+  // Sequelize's canonical model idiom wraps the model class in an anonymous
+  // factory arrow assigned to module.exports:
+  //   module.exports = (sequelize, DataTypes) => { class Price extends Model {} ... }
+  // The arrow has no variable_declarator parent (its parent is an
+  // assignment_expression), so name resolution leaves it <anonymous>. The
+  // walker must still descend into the arrow body so the nested class and its
+  // methods become graph nodes — otherwise every factory-form model is
+  // extraction dark matter (0/104 such files produced a class node).
+  it('should extract a class nested in a module.exports factory arrow', () => {
+    const code = `
+const { Model } = require('sequelize');
+
+module.exports = (sequelize, DataTypes) => {
+  class Price extends Model {
+    static associate(models) {
+      Price.belongsTo(models.ProductVariant);
+    }
+
+    toJSON() {
+      return { id: this.id, amount: this.amount };
+    }
+  }
+
+  Price.init({ amount: DataTypes.INTEGER }, { sequelize, modelName: 'Price' });
+
+  return Price;
+};
+`;
+    const result = extractFromSource('price.js', code);
+
+    const classNode = result.nodes.find((n) => n.kind === 'class' && n.name === 'Price');
+    expect(classNode).toBeDefined();
+    expect(classNode?.name).toBe('Price');
+
+    const methodNodes = result.nodes.filter((n) => n.kind === 'method');
+    const methodNames = methodNodes.map((m) => m.name).sort();
+    expect(methodNames).toEqual(expect.arrayContaining(['associate', 'toJSON']));
+  });
+
+  it('should not create a node for the anonymous factory arrow itself', () => {
+    const code = `
+module.exports = (sequelize, DataTypes) => {
+  class Widget extends Model {}
+  return Widget;
+};
+`;
+    const result = extractFromSource('widget.js', code);
+
+    // The factory arrow stays anonymous (no variable_declarator parent); we
+    // walk its body but must not emit a phantom <anonymous> function node.
+    const anonFunctions = result.nodes.filter(
+      (n) => n.kind === 'function' && n.name === '<anonymous>'
+    );
+    expect(anonFunctions).toHaveLength(0);
+  });
+});
+
 describe('Type Alias Extraction', () => {
   it('should extract exported type aliases in TypeScript', () => {
     const code = `

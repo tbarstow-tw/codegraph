@@ -630,7 +630,23 @@ export class TreeSitterExtractor {
         }
       }
     }
-    if (name === '<anonymous>') return; // Skip anonymous functions
+    if (name === '<anonymous>') {
+      // Skip creating a node for the anonymous function itself, but still walk
+      // its body for calls and nested structural declarations. The canonical
+      // case is the CommonJS/Sequelize factory idiom:
+      //   module.exports = (sequelize, DataTypes) => { class Price extends Model {} }
+      // The arrow's parent is an assignment_expression (not a
+      // variable_declarator), so no name is recoverable — but the nested class
+      // and its methods must still become graph nodes. Without this descent
+      // every factory-form model is extraction dark matter. Mirrors the
+      // misparsed-function branch below (skip node, keep the body walk).
+      const body = this.extractor.resolveBody?.(node, this.extractor.bodyField)
+        ?? getChildByField(node, this.extractor.bodyField);
+      if (body) {
+        this.visitFunctionBody(body, '');
+      }
+      return;
+    }
 
     // Check for misparse artifacts (e.g. C++ macros causing "namespace detail" functions)
     // Skip the node but still visit the body for calls and structural nodes
