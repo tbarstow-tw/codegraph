@@ -1085,11 +1085,93 @@ function ginMiddlewareChainEdges(queries: QueryBuilder, ctx: ResolutionContext):
   return edges;
 }
 
+// DI-member call binding: `this.<Cap>.<method>(` where <Cap> resolves to a
+// UNIQUE class node. Captures the dependency-injected-member call shape where a
+// class receives a collaborator via a constructor parameter property
+// (`constructor(private Price) {}` → `this.Price = Price`) and then calls
+// `this.Price.findAll()`. The member identity is the ctor param, not an import,
+// so name-resolution mis-binds the call onto the enclosing class's own local
+// property and the collaborator class gets zero caller edges. In tw-planning-svc
+// this is the repository→Sequelize-model gap; the rule is framework-agnostic
+// (any unique-named injected class collaborator), and empirically only model
+// classes match in that corpus (28 unique-class / 0 non-model / 0 ambiguous).
+const DI_MEMBER_CALL_RE = /\bthis\.([A-Z]\w*)\.(\w+)\s*\(/g;
+
+/**
+ * Phase 3: DI-member call → injected-class binding.
+ *
+ * For every `this.<Cap>.<method>(` in a JS/TS file whose receiver `<Cap>` is the
+ * name of exactly ONE class node in the graph, synthesize a `calls` edge from the
+ * enclosing method/function to that class node. Abstains when the receiver name
+ * is ambiguous (maps to >1 class node) or matches no class node — high precision,
+ * no points-to. Additive: the (wrong) base edge onto the local property remains.
+ */
+function diModelEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] {
+  // Receiver name → the single class node it denotes, or null when ambiguous.
+  // Built once from all class nodes so the per-file loop is O(1) per match.
+  const classByName = new Map<string, Node | null>();
+  for (const cls of queries.getNodesByKind('class')) {
+    if (classByName.has(cls.name)) {
+      classByName.set(cls.name, null); // second sighting → ambiguous, abstain
+    } else {
+      classByName.set(cls.name, cls);
+    }
+  }
+  if (classByName.size === 0) return [];
+
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  for (const file of ctx.getAllFiles()) {
+    if (
+      !(
+        file.endsWith('.js') ||
+        file.endsWith('.jsx') ||
+        file.endsWith('.ts') ||
+        file.endsWith('.tsx') ||
+        file.endsWith('.mjs') ||
+        file.endsWith('.cjs')
+      )
+    ) {
+      continue;
+    }
+    const raw = ctx.readFile(file);
+    if (!raw || !raw.includes('this.')) continue;
+    if (isGeneratedFile(file)) continue;
+    const content = stripCommentsForRegex(raw, 'typescript');
+    const nodesInFile = ctx.getNodesInFile(file);
+    const lineOf = (idx: number) => content.slice(0, idx).split('\n').length;
+
+    DI_MEMBER_CALL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = DI_MEMBER_CALL_RE.exec(content))) {
+      const receiver = m[1]!;
+      const method = m[2]!;
+      const target = classByName.get(receiver);
+      if (!target) continue; // unknown name or ambiguous → abstain
+      const enclosing = enclosingFn(nodesInFile, lineOf(m.index));
+      if (!enclosing || enclosing.id === target.id) continue;
+      const key = `${enclosing.id}>${target.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({
+        source: enclosing.id,
+        target: target.id,
+        kind: 'calls',
+        line: enclosing.startLine,
+        provenance: 'heuristic',
+        metadata: { synthesizedBy: 'di-model', receiver, method },
+      });
+    }
+  }
+  return edges;
+}
+
 /**
  * Synthesize dispatcher→callback edges (field observers + EventEmitters +
  * React re-render + JSX children + Vue templates + RN event channel +
- * Fabric native-impl + MyBatis Java↔XML + Gin middleware chain). Returns the
- * count added. Never throws into indexing — callers wrap in try/catch.
+ * Fabric native-impl + MyBatis Java↔XML + Gin middleware chain + DI-member
+ * binding). Returns the count added. Never throws into indexing — callers wrap
+ * in try/catch.
  */
 export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionContext): number {
   const fieldEdges = fieldChannelEdges(queries, ctx);
@@ -1105,6 +1187,7 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
   const fabricNativeEdges = fabricNativeImplEdges(ctx);
   const mybatisEdges = mybatisJavaXmlEdges(queries);
   const ginEdges = ginMiddlewareChainEdges(queries, ctx);
+  const diEdges = diModelEdges(queries, ctx);
 
   const merged: Edge[] = [];
   const seen = new Set<string>();
@@ -1122,6 +1205,7 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
     ...fabricNativeEdges,
     ...mybatisEdges,
     ...ginEdges,
+    ...diEdges,
   ]) {
     const key = `${e.source}>${e.target}`;
     if (seen.has(key)) continue;
