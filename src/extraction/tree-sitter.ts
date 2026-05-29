@@ -1736,6 +1736,21 @@ export class TreeSitterExtractor {
               } else {
                 calleeName = methodName;
               }
+            } else if (receiver && (receiver.type === 'member_expression' || receiver.type === 'field_expression')) {
+              // Repository idiom: this.Price.findAll() — the receiver is itself
+              // a member chain. When it is exactly `this.<prop>`, unwrap to
+              // <prop> so the resolver can bind to the injected field/collaborator
+              // (mirrors the Java field_access(this, field) unwrap above).
+              // Deeper chains (this.a.b.c()) have a member_expression object that
+              // is NOT `this`, so they fall through to the bare method and never
+              // synthesize a false receiver.
+              const inner = getChildByField(receiver, 'object') || getChildByField(receiver, 'argument');
+              const innerProp = getChildByField(receiver, 'property') || getChildByField(receiver, 'field');
+              if (inner && innerProp && (inner.type === 'this' || inner.type === 'this_expression')) {
+                calleeName = `${getNodeText(innerProp, this.source)}.${methodName}`;
+              } else {
+                calleeName = methodName;
+              }
             } else {
               calleeName = methodName;
             }

@@ -410,6 +410,82 @@ module.exports = (sequelize, DataTypes) => {
   });
 });
 
+describe('this-member receiver resolution (this.X.method)', () => {
+  // Repositories inject collaborators onto `this` and call through a nested
+  // member chain:  this.Price.findAll()
+  // The call's receiver (this.Price) is a member_expression, not a bare
+  // identifier, so the receiver name was discarded and the call emitted as the
+  // bare method `findAll` — unresolvable against the injected model. We unwrap
+  // `this.<prop>` to use <prop> as the receiver (mirrors the Java
+  // field_access(this, field) unwrap), emitting `Price.findAll`.
+  it('should use the property as receiver for this.<prop>.method() calls', () => {
+    const code = `
+export class PriceRepository {
+  private Price: any;
+  constructor(Price: any) {
+    this.Price = Price;
+  }
+  findByVariant() {
+    return this.Price.findAll();
+  }
+}
+`;
+    const result = extractFromSource('PriceRepository.ts', code);
+
+    const call = result.unresolvedReferences.find(
+      (ref) => ref.referenceKind === 'calls' && ref.referenceName === 'Price.findAll'
+    );
+    expect(call).toBeDefined();
+
+    // The bare-method form must no longer be emitted for this call.
+    const bare = result.unresolvedReferences.find(
+      (ref) => ref.referenceKind === 'calls' && ref.referenceName === 'findAll'
+    );
+    expect(bare).toBeUndefined();
+  });
+
+  it('should keep this.method() (single member on this) as the bare method', () => {
+    const code = `
+export class Svc {
+  run() {
+    return this.helper();
+  }
+}
+`;
+    const result = extractFromSource('Svc.ts', code);
+
+    const call = result.unresolvedReferences.find(
+      (ref) => ref.referenceKind === 'calls' && ref.referenceName === 'helper'
+    );
+    expect(call).toBeDefined();
+  });
+
+  it('should not synthesize a binding for deeper this.a.b.c() chains', () => {
+    const code = `
+export class Svc {
+  run() {
+    return this.a.b.c();
+  }
+}
+`;
+    const result = extractFromSource('Svc.ts', code);
+
+    // Deeper chains fall through to the safe bare-method default rather than
+    // inventing a receiver. We must not emit a.b.c, a.c, or b.c.
+    const synthesized = result.unresolvedReferences.find(
+      (ref) =>
+        ref.referenceKind === 'calls' &&
+        ['a.c', 'b.c', 'a.b.c'].includes(ref.referenceName)
+    );
+    expect(synthesized).toBeUndefined();
+
+    const bare = result.unresolvedReferences.find(
+      (ref) => ref.referenceKind === 'calls' && ref.referenceName === 'c'
+    );
+    expect(bare).toBeDefined();
+  });
+});
+
 describe('Type Alias Extraction', () => {
   it('should extract exported type aliases in TypeScript', () => {
     const code = `
