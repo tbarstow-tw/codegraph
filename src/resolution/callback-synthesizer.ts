@@ -1297,6 +1297,6 @@ export function synthesizeCallbackEdges(queries: QueryBuilder, ctx: ResolutionCo
     seen.add(key);
     merged.push(e);
   }
-  if (merged.length > 0) queries.insertEdges(merged);
+  queries.replaceHeuristicSynthesizedEdges(merged);
   return merged.length;
 }

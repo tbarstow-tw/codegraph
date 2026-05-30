@@ -255,6 +255,51 @@ describe('DI-model factory-arg edge synthesizer (M3)', () => {
     }
   });
 
+  it('does not duplicate factory-arg edges when indexAll runs twice', async () => {
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      '{"name":"x","dependencies":{"sequelize":"^6"}}'
+    );
+    writeModel('Price', 'price.js');
+    writeGenerics();
+    fs.writeFileSync(
+      path.join(dir, 'PriceRepository.ts'),
+      [
+        "import { create, findById, ICreate, IFindById } from './generics';",
+        '',
+        'export class PriceRepository {',
+        '  public createPrice: ICreate<Price>;',
+        '  public findPriceById: IFindById<Price>;',
+        '  constructor(private Price) {',
+        '    this.createPrice = create(Price);',
+        '    this.findPriceById = findById(Price);',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+    await cg.indexAll();
+
+    const db = (cg as any).db.db;
+    const rows = db
+      .prepare(
+        `SELECT s.name source_name, t.name target_name
+         FROM edges e
+         JOIN nodes s ON s.id = e.source
+         JOIN nodes t ON t.id = e.target
+         WHERE json_extract(e.metadata,'$.synthesizedBy') = 'di-model-factory-arg'`
+      )
+      .all();
+    cg.close?.();
+
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((r: any) => `${r.source_name}->${r.target_name}`))).toEqual(
+      new Set(['createPrice->Price', 'findPriceById->Price'])
+    );
+  });
+
   it('abstains on factory-arg when the model name maps to >1 class node (ambiguous)', async () => {
     fs.writeFileSync(
       path.join(dir, 'package.json'),
