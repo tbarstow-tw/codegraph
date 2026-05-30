@@ -9,7 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { CodeGraph } from '../src';
-import { extractFromSource, scanDirectory } from '../src/extraction';
+import { extractFromSource, scanDirectory, buildDefaultIgnore } from '../src/extraction';
 import { detectLanguage, isLanguageSupported, getSupportedLanguages, initGrammars, loadAllGrammars } from '../src/extraction/grammars';
 import { normalizePath } from '../src/utils';
 
@@ -4519,5 +4519,41 @@ void helperFunction(int count) {
   it('should report Objective-C as supported', () => {
     expect(isLanguageSupported('objc')).toBe(true);
     expect(getSupportedLanguages()).toContain('objc');
+  });
+});
+
+describe('buildDefaultIgnore — AI agent tooling exclusion (AOP-2360)', () => {
+  // The default matcher must exclude AI assistant config dirs so bundled helper
+  // scripts (e.g. .claude/skills/**/*.py) never enter the graph. These dirs are
+  // project configuration, not the codebase under audit; indexing them injects
+  // phantom symbols and call edges (a helper's `json.dumps()` → a `json` call
+  // node) that pollute reachability metrics on every shallow handler.
+  let tmp: string;
+  beforeEach(() => { tmp = createTempDir(); });
+  afterEach(() => { cleanupTempDir(tmp); });
+
+  it('ignores indexable source nested under .claude/', () => {
+    const ig = buildDefaultIgnore(tmp);
+    expect(ig.ignores('.claude/skills/jiro/scripts/collect_retro_context.py')).toBe(true);
+    expect(ig.ignores('.claude/settings.json')).toBe(true);
+  });
+
+  it('ignores other AI agent tooling dirs', () => {
+    const ig = buildDefaultIgnore(tmp);
+    expect(ig.ignores('.cursor/rules/foo.ts')).toBe(true);
+    expect(ig.ignores('.windsurf/helper.js')).toBe(true);
+    expect(ig.ignores('.aider/script.py')).toBe(true);
+  });
+
+  it('does NOT ignore real source that merely contains "claude" in the name', () => {
+    const ig = buildDefaultIgnore(tmp);
+    expect(ig.ignores('src/claudeClient.ts')).toBe(false);
+    expect(ig.ignores('src/services/claude-adapter/index.ts')).toBe(false);
+  });
+
+  it('honors an explicit .gitignore negation to opt back in', () => {
+    fs.writeFileSync(path.join(tmp, '.gitignore'), '!.claude/\n');
+    const ig = buildDefaultIgnore(tmp);
+    expect(ig.ignores('.claude/skills/jiro/scripts/collect_retro_context.py')).toBe(false);
   });
 });

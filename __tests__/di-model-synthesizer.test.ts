@@ -135,3 +135,216 @@ describe('DI-model edge synthesizer', () => {
     expect(rows.length).toBe(0);
   });
 });
+
+/**
+ * M3: DI factory-arg → model-class binding (AOP-2361).
+ *
+ * Second real shape in tw-planning-svc's repo layer: instead of
+ * `this.Price.findAll()`, the repository names the model as a FACTORY-CALL
+ * ARGUMENT in the constructor and stores the closure on a member:
+ *
+ *   public createPrice: ICreate<Price>;          // member node, decl line
+ *   constructor(private Price) {
+ *     this.createPrice = create(Price);          // assignment in ctor body
+ *   }
+ *
+ * The model identity (`Price`) is a literal token at the call site, but the
+ * call lives in the constructor body — so `enclosingFn` would anchor the edge
+ * on the CONSTRUCTOR, which is reach-inert (no route reaches a bare ctor).
+ * The route-traversed node is the MEMBER (`createPrice`). M3 must therefore
+ * anchor the synthesized edge on the member node, looked up by name within the
+ * enclosing class — NOT on the enclosing function. Tagged
+ * `synthesizedBy:'di-model-factory-arg'` to keep M1/M3 deltas separable.
+ */
+describe('DI-model factory-arg edge synthesizer (M3)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'di-model-m3-fixture-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writeGenerics() {
+    // The factory module: each factory takes the model class and returns a closure.
+    fs.writeFileSync(
+      path.join(dir, 'generics.ts'),
+      [
+        'export type ICreate<T> = (data: any) => Promise<T>;',
+        'export type IFindById<T> = (id: string) => Promise<T | null>;',
+        'export const create = <T>(Model: any): ICreate<T> => async (d) => Model.create(d);',
+        'export const findById = <T>(Model: any): IFindById<T> => async (id) => Model.findByPk(id);',
+      ].join('\n')
+    );
+  }
+
+  function writeModel(name: string, file: string) {
+    fs.mkdirSync(path.join(dir, 'models'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'models', file),
+      [
+        "const { Model } = require('sequelize');",
+        'module.exports = (sequelize, DataTypes) => {',
+        `  class ${name} extends Model {}`,
+        `  ${name}.init({}, { sequelize });`,
+        `  return ${name};`,
+        '};',
+      ].join('\n')
+    );
+  }
+
+  it('anchors the factory-arg edge on the MEMBER node, not the constructor', async () => {
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      '{"name":"x","dependencies":{"sequelize":"^6"}}'
+    );
+    writeModel('Price', 'price.js');
+    writeGenerics();
+    // Repository: field-decl members + constructor that binds via factory-arg.
+    fs.writeFileSync(
+      path.join(dir, 'PriceRepository.ts'),
+      [
+        "import { create, findById, ICreate, IFindById } from './generics';",
+        '',
+        'export class PriceRepository {',
+        '  public createPrice: ICreate<Price>;',
+        '  public findPriceById: IFindById<Price>;',
+        '  constructor(private Price) {',
+        '    this.createPrice = create(Price);',
+        '    this.findPriceById = findById(Price);',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+
+    const db = (cg as any).db.db;
+    const rows = db
+      .prepare(
+        `SELECT s.name source_name, s.kind source_kind,
+                t.name target_name, t.kind target_kind,
+                json_extract(e.metadata,'$.receiver') receiver,
+                e.kind edge_kind, e.provenance provenance
+         FROM edges e
+         JOIN nodes s ON s.id = e.source
+         JOIN nodes t ON t.id = e.target
+         WHERE json_extract(e.metadata,'$.synthesizedBy') = 'di-model-factory-arg'`
+      )
+      .all();
+    cg.close?.();
+
+    // Two factory-arg bindings → two member-anchored edges to the Price class.
+    const toPrice = rows.filter((r: any) => r.target_name === 'Price');
+    expect(toPrice.length).toBe(2);
+
+    const bySource = new Set(toPrice.map((r: any) => r.source_name));
+    // Edges anchored on the MEMBERS, by name.
+    expect(bySource.has('createPrice')).toBe(true);
+    expect(bySource.has('findPriceById')).toBe(true);
+    // CRUCIAL: never anchored on the constructor (reach-inert trap).
+    expect(bySource.has('constructor')).toBe(false);
+
+    for (const e of toPrice) {
+      expect(e.target_kind).toBe('class');
+      expect(e.edge_kind).toBe('calls');
+      expect(e.provenance).toBe('heuristic');
+    }
+  });
+
+  it('does not duplicate factory-arg edges when indexAll runs twice', async () => {
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      '{"name":"x","dependencies":{"sequelize":"^6"}}'
+    );
+    writeModel('Price', 'price.js');
+    writeGenerics();
+    fs.writeFileSync(
+      path.join(dir, 'PriceRepository.ts'),
+      [
+        "import { create, findById, ICreate, IFindById } from './generics';",
+        '',
+        'export class PriceRepository {',
+        '  public createPrice: ICreate<Price>;',
+        '  public findPriceById: IFindById<Price>;',
+        '  constructor(private Price) {',
+        '    this.createPrice = create(Price);',
+        '    this.findPriceById = findById(Price);',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+    await cg.indexAll();
+
+    const db = (cg as any).db.db;
+    const rows = db
+      .prepare(
+        `SELECT s.name source_name, t.name target_name
+         FROM edges e
+         JOIN nodes s ON s.id = e.source
+         JOIN nodes t ON t.id = e.target
+         WHERE json_extract(e.metadata,'$.synthesizedBy') = 'di-model-factory-arg'`
+      )
+      .all();
+    cg.close?.();
+
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((r: any) => `${r.source_name}->${r.target_name}`))).toEqual(
+      new Set(['createPrice->Price', 'findPriceById->Price'])
+    );
+  });
+
+  it('abstains on factory-arg when the model name maps to >1 class node (ambiguous)', async () => {
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      '{"name":"x","dependencies":{"sequelize":"^6"}}'
+    );
+    // Two distinct classes both named Coupon → ambiguous arg identity.
+    fs.writeFileSync(
+      path.join(dir, 'coupon-a.ts'),
+      ['export class Coupon {', '  static create() {}', '}'].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'coupon-b.ts'),
+      ['export class Coupon {', '  static create() {}', '}'].join('\n')
+    );
+    writeGenerics();
+    fs.writeFileSync(
+      path.join(dir, 'CouponRepository.ts'),
+      [
+        "import { create, ICreate } from './generics';",
+        '',
+        'export class CouponRepository {',
+        '  public createCoupon: ICreate<any>;',
+        '  constructor(private Coupon) {',
+        '    this.createCoupon = create(Coupon);',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+
+    const db = (cg as any).db.db;
+    const rows = db
+      .prepare(
+        `SELECT t.name target_name
+         FROM edges e
+         JOIN nodes t ON t.id = e.target
+         WHERE json_extract(e.metadata,'$.synthesizedBy') = 'di-model-factory-arg'
+           AND json_extract(e.metadata,'$.receiver') = 'Coupon'`
+      )
+      .all();
+    cg.close?.();
+
+    // Ambiguous arg identity: must abstain (M1's classByName discipline).
+    expect(rows.length).toBe(0);
+  });
+});
