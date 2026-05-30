@@ -84,6 +84,47 @@ function enclosingFn(nodesInFile: Node[], line: number): Node | null {
   return best;
 }
 
+const CLASS_KINDS = new Set(['class']);
+const MEMBER_KINDS = new Set(['method', 'property', 'field']);
+
+/** Innermost class node whose line range contains `line`. */
+function enclosingClass(nodesInFile: Node[], line: number): Node | null {
+  let best: Node | null = null;
+  for (const n of nodesInFile) {
+    if (!CLASS_KINDS.has(n.kind)) continue;
+    const end = n.endLine ?? n.startLine;
+    if (n.startLine <= line && end >= line) {
+      if (!best || n.startLine >= best.startLine) best = n; // tightest encloser
+    }
+  }
+  return best;
+}
+
+/**
+ * The member node (`this.<name> = ...`) within `cls`'s line span, looked up by
+ * name. M3 factory-arg assignments live in the constructor BODY, but the route-
+ * traversed node is the field-declaration member (e.g. `createPrice`), declared
+ * separately — so we resolve the edge source by NAME within the class, never via
+ * the enclosing function (which would return the reach-inert constructor).
+ * Prefers the earliest declaration (decl precedes the constructor assignment);
+ * abstains (returns null) when no uniquely-named member exists.
+ */
+function memberByName(nodesInFile: Node[], cls: Node, name: string): Node | null {
+  const clsEnd = cls.endLine ?? cls.startLine;
+  const hits = nodesInFile.filter(
+    (n) =>
+      MEMBER_KINDS.has(n.kind) &&
+      n.name === name &&
+      n.startLine >= cls.startLine &&
+      (n.endLine ?? n.startLine) <= clsEnd &&
+      n.id !== cls.id
+  );
+  if (hits.length === 0) return null;
+  // Prefer the earliest (the field declaration, ahead of any ctor-body node).
+  hits.sort((a, b) => a.startLine - b.startLine);
+  return hits[0]!;
+}
+
 /** Phase 1: field-backed observer channels (registrar/dispatcher share a store). */
 function fieldChannelEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] {
   const candidates = [...queries.getNodesByKind('method'), ...queries.getNodesByKind('function')];
@@ -1097,6 +1138,19 @@ function ginMiddlewareChainEdges(queries: QueryBuilder, ctx: ResolutionContext):
 // classes match in that corpus (28 unique-class / 0 non-model / 0 ambiguous).
 const DI_MEMBER_CALL_RE = /\bthis\.([A-Z]\w*)\.(\w+)\s*\(/g;
 
+// M3 (AOP-2361): factory-arg shape. `this.<member> = <factory>(<Model>)` where
+// <Model> is a bare PascalCase identifier passed as the SOLE leading argument
+// to a factory call (the repo-layer `create(Entitlement)`, `findById(Feature)`
+// idiom). The model identity is the literal arg, the edge anchor is the member
+// (the route-traversed node), NOT the enclosing constructor. Safe-abstains on
+// TS variants that don't denote a plain class arg: typecasts (`create(X as any)`),
+// type-arg-only calls with no value arg, and namespaced factories (`g.create(X)`
+// — leading `.` excluded by requiring the factory ident to start at a word
+// boundary not preceded by `.`). The captured arg must be a single PascalCase
+// token immediately followed by `)` or `,` so destructure/expression args abstain.
+const DI_FACTORY_ARG_RE =
+  /\bthis\.(\w+)\s*=\s*(?<![.\w])([a-z]\w*)\s*(?:<[^>()]*>)?\s*\(\s*([A-Z]\w*)\s*[),]/g;
+
 /**
  * Phase 3: DI-member call → injected-class binding.
  *
@@ -1160,6 +1214,37 @@ function diModelEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] {
         line: enclosing.startLine,
         provenance: 'heuristic',
         metadata: { synthesizedBy: 'di-model', receiver, method },
+      });
+    }
+
+    // M3 (AOP-2361): factory-arg shape. `this.<member> = factory(<Model>)`.
+    // Same precision gate (classByName: unique class arg or abstain), but the
+    // edge SOURCE is the member node (looked up by name within the enclosing
+    // class), never the enclosing function — that would be the reach-inert
+    // constructor. The arg identity plays the role M1's receiver does.
+    DI_FACTORY_ARG_RE.lastIndex = 0;
+    let fm: RegExpExecArray | null;
+    while ((fm = DI_FACTORY_ARG_RE.exec(content))) {
+      const member = fm[1]!;
+      const factory = fm[2]!;
+      const modelName = fm[3]!;
+      const target = classByName.get(modelName);
+      if (!target) continue; // unknown arg name or ambiguous → abstain
+      const line = lineOf(fm.index);
+      const cls = enclosingClass(nodesInFile, line);
+      if (!cls) continue; // not inside a class body → abstain
+      const src = memberByName(nodesInFile, cls, member);
+      if (!src || src.id === target.id) continue; // no member node → abstain (never fall back to ctor)
+      const key = `${src.id}>${target.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({
+        source: src.id,
+        target: target.id,
+        kind: 'calls',
+        line: src.startLine,
+        provenance: 'heuristic',
+        metadata: { synthesizedBy: 'di-model-factory-arg', receiver: modelName, method: factory },
       });
     }
   }
