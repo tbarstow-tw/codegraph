@@ -1236,6 +1236,22 @@ export class QueryBuilder {
     });
   }
 
+  private insertEdgesForExistingNodes(edges: Edge[]): void {
+    const endpointIds = new Set<string>();
+    for (const edge of edges) {
+      endpointIds.add(edge.source);
+      endpointIds.add(edge.target);
+    }
+    const existingNodeIds = this.getExistingNodeIds([...endpointIds]);
+
+    for (const edge of edges) {
+      if (!existingNodeIds.has(edge.source) || !existingNodeIds.has(edge.target)) {
+        continue;
+      }
+      this.insertEdge(edge);
+    }
+  }
+
   /**
    * Insert multiple edges in a transaction
    */
@@ -1243,18 +1259,22 @@ export class QueryBuilder {
     if (edges.length === 0) return;
 
     this.db.transaction(() => {
-      const endpointIds = new Set<string>();
-      for (const edge of edges) {
-        endpointIds.add(edge.source);
-        endpointIds.add(edge.target);
-      }
-      const existingNodeIds = this.getExistingNodeIds([...endpointIds]);
+      this.insertEdgesForExistingNodes(edges);
+    })();
+  }
 
-      for (const edge of edges) {
-        if (!existingNodeIds.has(edge.source) || !existingNodeIds.has(edge.target)) {
-          continue;
-        }
-        this.insertEdge(edge);
+  replaceHeuristicSynthesizedEdges(edges: Edge[]): void {
+    this.db.transaction(() => {
+      this.db
+        .prepare(`
+          DELETE FROM edges
+          WHERE provenance = 'heuristic'
+            AND json_extract(metadata, '$.synthesizedBy') IS NOT NULL
+        `)
+        .run();
+
+      if (edges.length > 0) {
+        this.insertEdgesForExistingNodes(edges);
       }
     })();
   }
