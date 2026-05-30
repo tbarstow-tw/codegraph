@@ -136,6 +136,256 @@ describe('DI-model edge synthesizer', () => {
   });
 });
 
+describe('DI field-member edge synthesizer (AOP-2362)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'di-field-member-fixture-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writePackage() {
+    fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"x"}');
+  }
+
+  function fieldMemberEdges(cg: CodeGraph): any[] {
+    const db = (cg as any).db.db;
+    return db
+      .prepare(
+        `SELECT s.name source_name, s.kind source_kind,
+                t.name target_name, t.kind target_kind, t.qualified_name target_qn,
+                json_extract(e.metadata,'$.receiver') receiver,
+                json_extract(e.metadata,'$.method') method,
+                json_extract(e.metadata,'$.typeName') type_name,
+                e.kind edge_kind, e.provenance provenance
+         FROM edges e
+         JOIN nodes s ON s.id = e.source
+         JOIN nodes t ON t.id = e.target
+         WHERE json_extract(e.metadata,'$.synthesizedBy') = 'di-field-member'`
+      )
+      .all();
+  }
+
+  it('synthesizes from a lowercase private readonly parameter property to its explicit class type', async () => {
+    writePackage();
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeService.ts'),
+      [
+        'export class MembershipUpgradeService {',
+        '  getUpgradePreview() { return {}; }',
+        '}',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeController.ts'),
+      [
+        "import { MembershipUpgradeService } from './MembershipUpgradeService';",
+        '',
+        'export class MembershipUpgradeController {',
+        '  constructor(private readonly membershipUpgradeService: MembershipUpgradeService) {}',
+        '  getUpgradePreview() {',
+        '    return this.membershipUpgradeService.getUpgradePreview();',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+    const rows = fieldMemberEdges(cg);
+    cg.close?.();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      source_name: 'getUpgradePreview',
+      target_name: 'getUpgradePreview',
+      target_kind: 'method',
+      target_qn: 'MembershipUpgradeService::getUpgradePreview',
+      receiver: 'membershipUpgradeService',
+      method: 'getUpgradePreview',
+      type_name: 'MembershipUpgradeService',
+      edge_kind: 'calls',
+      provenance: 'heuristic',
+    });
+  });
+
+  it('pairs each lowercase field with its own constructor parameter type', async () => {
+    writePackage();
+    fs.writeFileSync(path.join(dir, 'Logger.ts'), ['export class Logger {', '  info() {}', '}'].join('\n'));
+    fs.writeFileSync(path.join(dir, 'Price.ts'), ['export class Price {', '  findAll() { return []; }', '}'].join('\n'));
+    fs.writeFileSync(
+      path.join(dir, 'PriceController.ts'),
+      [
+        "import { Logger } from './Logger';",
+        "import { Price } from './Price';",
+        '',
+        'export class PriceController {',
+        '  constructor(private readonly logger: Logger, private readonly price: Price) {}',
+        '  listPrices() {',
+        '    return this.price.findAll();',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+    const rows = fieldMemberEdges(cg);
+    cg.close?.();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      source_name: 'listPrices',
+      target_name: 'findAll',
+      target_qn: 'Price::findAll',
+      receiver: 'price',
+      type_name: 'Price',
+    });
+    expect(rows.some((r) => r.target_qn === 'Logger::info')).toBe(false);
+  });
+
+  it('abstains when the explicit parameter property type is ambiguous', async () => {
+    writePackage();
+    fs.writeFileSync(path.join(dir, 'service-a.ts'), ['export class MembershipUpgradeService {', '  getUpgradePreview() {}', '}'].join('\n'));
+    fs.writeFileSync(path.join(dir, 'service-b.ts'), ['export class MembershipUpgradeService {', '  getUpgradePreview() {}', '}'].join('\n'));
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeController.ts'),
+      [
+        'export class MembershipUpgradeController {',
+        '  constructor(private readonly membershipUpgradeService: MembershipUpgradeService) {}',
+        '  getUpgradePreview() {',
+        '    return this.membershipUpgradeService.getUpgradePreview();',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+    const rows = fieldMemberEdges(cg);
+    cg.close?.();
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it('abstains when the parameter property has no explicit type', async () => {
+    writePackage();
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeService.ts'),
+      ['export class MembershipUpgradeService {', '  getUpgradePreview() {}', '}'].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeController.ts'),
+      [
+        'export class MembershipUpgradeController {',
+        '  constructor(private readonly membershipUpgradeService) {}',
+        '  getUpgradePreview() {',
+        '    return this.membershipUpgradeService.getUpgradePreview();',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+    const rows = fieldMemberEdges(cg);
+    cg.close?.();
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it('abstains on plain constructor parameters plus this assignment', async () => {
+    writePackage();
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeService.ts'),
+      ['export class MembershipUpgradeService {', '  getUpgradePreview() {}', '}'].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeController.ts'),
+      [
+        'export class MembershipUpgradeController {',
+        '  private membershipUpgradeService: MembershipUpgradeService;',
+        '  constructor(membershipUpgradeService: MembershipUpgradeService) {',
+        '    this.membershipUpgradeService = membershipUpgradeService;',
+        '  }',
+        '  getUpgradePreview() {',
+        '    return this.membershipUpgradeService.getUpgradePreview();',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+    const rows = fieldMemberEdges(cg);
+    cg.close?.();
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it('abstains when the injected class does not have the called method', async () => {
+    writePackage();
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeService.ts'),
+      ['export class MembershipUpgradeService {', '  executeUpgrade() {}', '}'].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeController.ts'),
+      [
+        'export class MembershipUpgradeController {',
+        '  constructor(private readonly membershipUpgradeService: MembershipUpgradeService) {}',
+        '  getUpgradePreview() {',
+        '    return this.membershipUpgradeService.getUpgradePreview();',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+    const rows = fieldMemberEdges(cg);
+    cg.close?.();
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it('does not duplicate di-field-member edges when indexAll runs twice', async () => {
+    writePackage();
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeService.ts'),
+      ['export class MembershipUpgradeService {', '  getUpgradePreview() { return {}; }', '}'].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'MembershipUpgradeController.ts'),
+      [
+        'export class MembershipUpgradeController {',
+        '  constructor(private readonly membershipUpgradeService: MembershipUpgradeService) {}',
+        '  getUpgradePreview() {',
+        '    return this.membershipUpgradeService.getUpgradePreview();',
+        '  }',
+        '}',
+      ].join('\n')
+    );
+
+    const cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+    await cg.indexAll();
+    const rows = fieldMemberEdges(cg);
+    cg.close?.();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      source_name: 'getUpgradePreview',
+      target_name: 'getUpgradePreview',
+      target_qn: 'MembershipUpgradeService::getUpgradePreview',
+      receiver: 'membershipUpgradeService',
+    });
+  });
+});
+
 /**
  * M3: DI factory-arg → model-class binding (AOP-2361).
  *

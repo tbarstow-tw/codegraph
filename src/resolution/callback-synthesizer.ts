@@ -1151,6 +1151,58 @@ const DI_MEMBER_CALL_RE = /\bthis\.([A-Z]\w*)\.(\w+)\s*\(/g;
 const DI_FACTORY_ARG_RE =
   /\bthis\.(\w+)\s*=\s*(?<![.\w])([a-z]\w*)\s*(?:<[^>()]*>)?\s*\(\s*([A-Z]\w*)\s*[),]/g;
 
+// AOP-2362: lowercase constructor-parameter-property DI. The receiver's class
+// comes from its explicit type (`private svc: Service`), then the edge targets
+// the called method on that class so reachability continues through the callee.
+const DI_CONSTRUCTOR_RE = /\bconstructor\s*\(/g;
+const DI_FIELD_MEMBER_CALL_RE = /\bthis\.([a-z]\w*)\.(\w+)\s*\(/g;
+const DI_PARAM_PROPERTY_RE = /^(?:(?:public|private|protected|readonly)\s+)+([a-z]\w*)\s*:\s*([A-Z]\w*)\s*(?:=.*)?$/s;
+
+function tsBalancedArgs(s: string, openIdx: number): string | null {
+  let depth = 0;
+  for (let i = openIdx; i < s.length; i++) {
+    const c = s[i];
+    if (c === '(') depth++;
+    else if (c === ')') {
+      depth--;
+      if (depth === 0) return s.slice(openIdx + 1, i);
+    }
+  }
+  return null;
+}
+
+function tsSplitArgs(args: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const c of args) {
+    if (c === '(' || c === '[' || c === '{' || c === '<') {
+      depth++;
+      cur += c;
+    } else if (c === ')' || c === ']' || c === '}' || c === '>') {
+      depth--;
+      cur += c;
+    } else if (c === ',' && depth === 0) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+function diParamPropertyBinding(param: string, classByName: Map<string, Node | null>): { field: string; typeName: string; targetClass: Node } | null {
+  const m = param.trim().match(DI_PARAM_PROPERTY_RE);
+  if (!m) return null;
+  const field = m[1]!;
+  const typeName = m[2]!;
+  const targetClass = classByName.get(typeName);
+  if (!targetClass) return null;
+  return { field, typeName, targetClass };
+}
+
 /**
  * Phase 3: DI-member call → injected-class binding.
  *
@@ -1173,6 +1225,16 @@ function diModelEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] {
   }
   if (classByName.size === 0) return [];
 
+  const methodByClassAndName = new Map<string, Node | null>();
+  for (const cls of queries.getNodesByKind('class')) {
+    for (const edge of queries.getOutgoingEdges(cls.id, ['contains'])) {
+      const child = queries.getNodeById(edge.target);
+      if (!child || child.kind !== 'method') continue;
+      const key = `${cls.id}:${child.name}`;
+      methodByClassAndName.set(key, methodByClassAndName.has(key) ? null : child);
+    }
+  }
+
   const edges: Edge[] = [];
   const seen = new Set<string>();
   for (const file of ctx.getAllFiles()) {
@@ -1194,6 +1256,26 @@ function diModelEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] {
     const content = stripCommentsForRegex(raw, 'typescript');
     const nodesInFile = ctx.getNodesInFile(file);
     const lineOf = (idx: number) => content.slice(0, idx).split('\n').length;
+    const fieldBindingsByClass = new Map<string, Map<string, { typeName: string; targetClass: Node }>>();
+
+    DI_CONSTRUCTOR_RE.lastIndex = 0;
+    let cm: RegExpExecArray | null;
+    while ((cm = DI_CONSTRUCTOR_RE.exec(content))) {
+      const openIdx = cm.index + cm[0].length - 1;
+      const params = tsBalancedArgs(content, openIdx);
+      if (!params) continue;
+      const cls = enclosingClass(nodesInFile, lineOf(cm.index));
+      if (!cls) continue;
+      let bindings = fieldBindingsByClass.get(cls.id);
+      if (!bindings) {
+        bindings = new Map<string, { typeName: string; targetClass: Node }>();
+        fieldBindingsByClass.set(cls.id, bindings);
+      }
+      for (const param of tsSplitArgs(params)) {
+        const binding = diParamPropertyBinding(param, classByName);
+        if (binding) bindings.set(binding.field, { typeName: binding.typeName, targetClass: binding.targetClass });
+      }
+    }
 
     DI_MEMBER_CALL_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
@@ -1214,6 +1296,32 @@ function diModelEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] {
         line: enclosing.startLine,
         provenance: 'heuristic',
         metadata: { synthesizedBy: 'di-model', receiver, method },
+      });
+    }
+
+    DI_FIELD_MEMBER_CALL_RE.lastIndex = 0;
+    let dm: RegExpExecArray | null;
+    while ((dm = DI_FIELD_MEMBER_CALL_RE.exec(content))) {
+      const receiver = dm[1]!;
+      const method = dm[2]!;
+      const line = lineOf(dm.index);
+      const cls = enclosingClass(nodesInFile, line);
+      const binding = cls ? fieldBindingsByClass.get(cls.id)?.get(receiver) : undefined;
+      if (!binding) continue;
+      const target = methodByClassAndName.get(`${binding.targetClass.id}:${method}`);
+      if (!target) continue; // missing or overloaded target method → abstain
+      const enclosing = enclosingFn(nodesInFile, line);
+      if (!enclosing || enclosing.id === target.id) continue;
+      const key = `${enclosing.id}>${target.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({
+        source: enclosing.id,
+        target: target.id,
+        kind: 'calls',
+        line: enclosing.startLine,
+        provenance: 'heuristic',
+        metadata: { synthesizedBy: 'di-field-member', receiver, method, typeName: binding.typeName },
       });
     }
 
